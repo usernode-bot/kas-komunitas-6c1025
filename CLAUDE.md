@@ -88,13 +88,22 @@ tables you've marked private), etc.
 
 ## About Kas Komunitas
 
-Community cash ledger with income, expense, and balance.
-
-_(add a sentence or two more of product context here so Claude Code has a
-shared understanding of what this app is for)_
+A community cashbook (kas bersama) for a local community: one shared
+ledger of money in and money out, a running balance, and a month filter.
+Every signed-in member sees the whole ledger and can add entries; each
+entry records who added it. The UI copy is Indonesian (Saldo, Masuk,
+Keluar, Riwayat) to match the product's audience.
 
 ## App-specific conventions
 
-_(optional — e.g. "all currency values stored as integer cents, not
-floats"; "the `posts` table is append-only"; "avoid adding new
-dependencies"; etc.)_
+- Amounts are stored as **integer rupiah** (`BIGINT`) in the `entries`
+  table — IDR has no practical subunit, so no cents and no floats.
+  The add-entry form accepts digits only.
+- `entries` is a single **shared** table (public per platform rules: the
+  ledger is meant to be seen by all members). Rows carry `user_id` and
+  `username` for attribution, but there are no per-user ledgers.
+- Staging seeds six obviously fake rows (`staging-demo-user`) so a fresh
+  preview isn't an empty ledger; production never seeds.
+- No new dependencies. The frontend is one `public/index.html` with
+  inline JS; classes must be written as whole literals for the
+  precompiled Tailwind build.

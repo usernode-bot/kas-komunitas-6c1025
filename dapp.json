@@ -1,4 +1,21 @@
 {
   "description": "Community cash ledger with income, expense, and balance.",
-  "secrets": []
+  "secrets": [],
+  "tests": [
+    {
+      "id": "ledger.home",
+      "name": "Ledger renders with balance and entries",
+      "path": "/",
+      "expectSelector": "#ledger",
+      "expectText": "Saldo",
+      "visual": true,
+      "impact": ["public/index.html", "server.js", "dapp.json"]
+    },
+    {
+      "name": "Month filter bar renders",
+      "path": "/",
+      "expectSelector": "#monthbar",
+      "expectText": "Semua"
+    }
+  ]
 }

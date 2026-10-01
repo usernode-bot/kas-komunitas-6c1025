@@ -6,6 +6,10 @@ const jwt = require('jsonwebtoken');
 const app = express();
 const port = process.env.PORT || 3000;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+// Staging only ever swaps DATA and suppresses outbound side effects — never
+// features. Here it decides whether the boot seed block runs; the seed plants
+// obviously fake demo rows so a fresh staging preview isn't an empty ledger.
+const IS_STAGING = process.env.USERNODE_ENV === 'staging';
 
 // The platform signs user-identity tokens with an RSA private key it never
 // shares. Containers get only the PUBLIC half, so this app can verify who a
@@ -109,29 +113,75 @@ app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 // fresh load.
 app.get('/favicon.ico', (_req, res) => res.status(204).end());
 
-// Button press
-app.post('/api/press', async (req, res) => {
+// Ledger read: the all-time balance, the totals for the selected period and
+// the entries themselves. `?month=YYYY-MM` filters the list and the totals;
+// without it everything is returned. Amounts are integer rupiah.
+app.get('/api/entries', async (req, res) => {
+  const month = req.query.month;
+  if (month != null && !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    return res.status(400).json({ error: 'Bulan tidak valid' });
+  }
+  const where = month ? `WHERE to_char(occurred_on, 'YYYY-MM') = $1` : '';
+  const args = month ? [month] : [];
   try {
-    await pool.query(`
-      INSERT INTO presses (user_id, username) VALUES ($1, $2)
-    `, [req.user.id, req.user.username]);
-    res.json({ ok: true });
+    const entries = await pool.query(`
+      SELECT id, username, type, amount, note,
+             to_char(occurred_on, 'YYYY-MM-DD') AS occurred_on
+      FROM entries ${where}
+      ORDER BY occurred_on DESC, id DESC
+      LIMIT 500
+    `, args);
+    const balance = await pool.query(`
+      SELECT COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 0) AS balance
+      FROM entries
+    `);
+    const totals = await pool.query(`
+      SELECT COALESCE(SUM(CASE WHEN type = 'income'  THEN amount ELSE 0 END), 0) AS income,
+             COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) AS expense
+      FROM entries ${where}
+    `, args);
+    res.json({
+      balance: Number(balance.rows[0].balance),
+      income: Number(totals.rows[0].income),
+      expense: Number(totals.rows[0].expense),
+      entries: entries.rows,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Leaderboard
-app.get('/api/leaderboard', async (_req, res) => {
+// Ledger write: one entry, typed income/expense, integer rupiah, optional
+// note, date defaulting to today. The ledger is shared — every signed-in
+// member sees it — so each row records who added it.
+app.post('/api/entries', async (req, res) => {
+  const body = req.body || {};
+  const type = body.type;
+  const amount = Number(body.amount);
+  let date = body.date;
+  if (type !== 'income' && type !== 'expense') {
+    return res.status(400).json({ error: 'Pilih pemasukan atau pengeluaran' });
+  }
+  if (!Number.isInteger(amount) || amount <= 0 || amount > 1e12) {
+    return res.status(400).json({ error: 'Nominal harus angka lebih dari 0' });
+  }
+  if (body.note != null && (typeof body.note !== 'string' || body.note.length > 200)) {
+    return res.status(400).json({ error: 'Catatan maksimal 200 karakter' });
+  }
+  if (date == null || date === '') {
+    date = new Date().toISOString().slice(0, 10);
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(Date.parse(date))) {
+    return res.status(400).json({ error: 'Tanggal tidak valid' });
+  }
   try {
     const { rows } = await pool.query(`
-      SELECT username, COUNT(*) as presses
-      FROM presses
-      GROUP BY username
-      ORDER BY presses DESC
-      LIMIT 50
-    `);
-    res.json({ leaderboard: rows });
+      INSERT INTO entries (user_id, username, type, amount, note, occurred_on)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id, username, type, amount, note,
+                to_char(occurred_on, 'YYYY-MM-DD') AS occurred_on
+    `, [req.user.id, req.user.username, type, amount, (body.note || '').trim(), date]);
+    res.json({ entry: rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -176,16 +226,81 @@ app.get('*', (req, res) => {
 
 async function start() {
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS presses (
+    CREATE TABLE IF NOT EXISTS entries (
       id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL,
       username VARCHAR(255) NOT NULL,
+      type VARCHAR(10) NOT NULL CHECK (type IN ('income', 'expense')),
+      amount BIGINT NOT NULL CHECK (amount > 0),
+      note VARCHAR(200) NOT NULL DEFAULT '',
+      occurred_on DATE NOT NULL,
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS entries_occurred_on_idx ON entries (occurred_on)`
+  );
+  // Demo table from the replaced starter template; the demo screen and its
+  // endpoints are gone, so the table goes too.
+  await pool.query(`DROP TABLE IF EXISTS presses`);
+
+  // Staging previews start with an empty ledger (the entries table is new).
+  // Seed a handful of obviously fake rows so the screen is reviewable.
+  // Fake identities only — never rows owned by whoever opened the preview.
+  if (IS_STAGING) {
+    // Month-relative dates: a few entries inside the CURRENT month and a
+    // few in the previous one, so both views have data no matter when the
+    // preview boots. Clamped to today so nothing lands in the future.
+    const now = new Date();
+    const cur = (dayOfMonth) => new Date(now.getFullYear(), now.getMonth(),
+      Math.min(dayOfMonth, now.getDate())).toISOString().slice(0, 10);
+    const prev = (dayOfMonth) => new Date(now.getFullYear(), now.getMonth() - 1,
+      dayOfMonth).toISOString().slice(0, 10);
+    await pool.query(`
+      INSERT INTO entries (id, user_id, username, type, amount, note, occurred_on) VALUES
+        (900001, 0, 'staging-demo-user', 'income',  500000, 'Staging demo: iuran bulanan anggota', $1),
+        (900002, 0, 'staging-demo-user', 'income',  250000, 'Staging demo: donasi kegiatan', $2),
+        (900003, 0, 'staging-demo-user', 'expense', 150000, 'Staging demo: konsumsi rapat', $3),
+        (900004, 0, 'staging-demo-user', 'expense',  75000, 'Staging demo: transportasi', $4),
+        (900005, 0, 'staging-demo-user', 'income',  400000, 'Staging demo: iuran bulan lalu', $5),
+        (900006, 0, 'staging-demo-user', 'expense', 200000, 'Staging demo: perlengkapan', $6)
+      ON CONFLICT (id) DO NOTHING
+    `, [cur(2), cur(5), cur(7), cur(12), prev(20), prev(10)]);
+  }
+
   const server = app.listen(port, () => console.log(`Listening on :${port}`));
   // Let Envoy retire idle upstream connections at 60s, with a 15s margin.
   server.keepAliveTimeout = 75_000;
+  return server;
 }
 
-start().catch(err => { console.error(err); process.exit(1); });
+// Graceful shutdown: the platform SIGTERMs the container on every deploy.
+// Stop accepting connections, drain briefly, close the pool, exit — and
+// make a repeat signal a no-op.
+const DRAIN_MS = 3000;
+let shuttingDown = false;
+let currentServer = null;
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal} received, draining`);
+  if (currentServer) {
+    currentServer.close(() => {});
+    currentServer.closeIdleConnections?.();
+    const t = setTimeout(() => currentServer.closeAllConnections?.(), DRAIN_MS);
+    t.unref?.();
+  }
+  try {
+    await pool.end();
+  } catch (e) {
+    console.error('[shutdown] pool.end failed', e.message);
+  }
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+start().then((server) => { currentServer = server; })
+  .catch(err => { console.error(err); process.exit(1); });

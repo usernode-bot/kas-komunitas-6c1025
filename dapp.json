@@ -9,7 +9,11 @@
       "expectSelector": "#ledger",
       "expectText": "Saldo",
       "visual": true,
-      "impact": ["public/index.html", "server.js", "dapp.json"]
+      "impact": [
+        "public/index.html",
+        "server.js",
+        "dapp.json"
+      ]
     },
     {
       "name": "Month filter bar renders",
@@ -17,5 +21,6 @@
       "expectSelector": "#monthbar",
       "expectText": "Semua"
     }
-  ]
+  ],
+  "name": "Community Fund"
 }

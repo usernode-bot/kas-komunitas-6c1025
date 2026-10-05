@@ -22,5 +22,6 @@
       "expectText": "Semua"
     }
   ],
-  "name": "Community Fund"
+  "name": "Community Fund",
+  "icon": { "emoji": "💰" }
 }
